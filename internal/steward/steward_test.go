@@ -263,16 +263,20 @@ func TestPushSharedHost(t *testing.T) {
 		t.Skip("rsync not installed")
 	}
 	e := newEnv(t)
-	// Put n1 in both clusters, with c2's remote dir.
+	// Put n2 in both clusters, with the same remote dir.
 	e.s.Cfg.Clusters[0].Nodes = append(e.s.Cfg.Clusters[0].Nodes, config.Node{Host: "n2", User: "u", Port: 22})
-	e.s.Cfg.Clusters[0].RemoteDir = e.s.Cfg.Clusters[1].RemoteDir
-	// Fake ssh that fails if another session for the same host is active.
-	lockDir := t.TempDir()
+	for i := range e.s.Cfg.Clusters {
+		e.s.Cfg.Clusters[i].RemoteDir = "certs"
+	}
+	// Fake ssh giving each host its own filesystem root (so hosts can't see
+	// each other's files), and failing if a second session to the same host
+	// overlaps one already running.
+	hosts, lockDir := t.TempDir(), t.TempDir()
 	script := filepath.Join(t.TempDir(), "lockssh")
 	os.WriteFile(script, []byte(`#!/bin/sh
 while [ "$1" != "rsync" ]; do host=$1; shift; done
 mkdir "`+lockDir+`/$host" 2>/dev/null || { echo "concurrent session" >&2; exit 12; }
-"$@"; rc=$?
+mkdir -p "`+hosts+`/$host/certs" && cd "`+hosts+`/$host" && "$@"; rc=$?
 rmdir "`+lockDir+`/$host"
 exit $rc
 `), 0o755)
@@ -283,8 +287,17 @@ exit $rc
 			t.Fatalf("%d push failures:\n%s", f, e.logs.String())
 		}
 	}
+	// One push to n1 and one merged push (a and b) to n2; later rounds are no-ops.
 	if n := strings.Count(e.logs.String(), "event=push.node_updated"); n != 2 {
 		t.Errorf("expected 2 updates (n1, merged n2), got %d\n%s", n, e.logs.String())
+	}
+	for _, f := range []string{"n1/certs/a", "n2/certs/a", "n2/certs/b"} {
+		if _, err := os.Stat(filepath.Join(hosts, f, "current", store.FileFullchain)); err != nil {
+			t.Errorf("%s not delivered: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(hosts, "n1/certs/b")); !os.IsNotExist(err) {
+		t.Error("b delivered to n1, which is only in c1")
 	}
 	ps, _ := e.s.Store.PushState()
 	if ps["c1/n2"]["a"].Version == "" || ps["c2/n2"]["b"].Version == "" {
