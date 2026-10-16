@@ -78,7 +78,10 @@ func (iss *Issuer) client(keyType string) (*lego.Client, error) {
 	}
 	if iss.provider != nil {
 		if err := c.Challenge.SetDNS01Provider(iss.provider,
-			append([]dns01.ChallengeOption{dns01.AddRecursiveNameservers(iss.cfg.DNS.Resolvers)}, ExtraDNSOptions...)...); err != nil {
+			append([]dns01.ChallengeOption{
+				dns01.AddRecursiveNameservers(iss.cfg.DNS.Resolvers),
+				settle(iss.cfg.DNS.PropagationSettle.D(), iss.log),
+			}, ExtraDNSOptions...)...); err != nil {
 			return nil, err
 		}
 	}
@@ -257,6 +260,20 @@ func splitBundle(b []byte) (leaf, chain []byte) {
 			chain = append(chain, enc...)
 		}
 	}
+}
+
+// settle waits an extra period once lego's propagation check passes, before
+// the CA is told to validate (see config.DNS.PropagationSettle).
+func settle(wait time.Duration, log *slog.Logger) dns01.ChallengeOption {
+	return dns01.WrapPreCheck(func(domain, fqdn, value string, check dns01.PreCheckFunc) (bool, error) {
+		ok, err := check(fqdn, value)
+		if ok && err == nil && wait > 0 {
+			log.Debug("challenge record visible; letting it settle", "event", "cert.challenge_settle",
+				"domain", domain, "wait", wait.String())
+			time.Sleep(wait)
+		}
+		return ok, err
+	})
 }
 
 // delegatedProvider refuses to write challenge records anywhere except the

@@ -60,13 +60,6 @@ printf '%s' "$E2E_DO_PROVIDER_TOKEN" > "$WORK/steward/do_token"
 chmod 0644 "$WORK/steward/do_token" # readable by the container user; see lib.sh
 export STEWARD_DO_TOKEN_FILE=/run/secrets/acme-steward/do_token
 
-do_ns=()
-for ns in ns1 ns2 ns3; do
-  ip=$(dig +short A $ns.digitalocean.com | head -1)
-  [[ -n $ip ]] && do_ns+=("$ip")
-done
-[[ ${#do_ns[@]} -gt 0 ]] || fail "cannot resolve DigitalOcean nameservers"
-
 write_config() { # write_config RESOLVERS_YAML
   cat <<YAML
 acme: {ca: letsencrypt-staging, accept_terms: true}
@@ -88,11 +81,6 @@ certificates:
 YAML
 }
 write_config "" > "$WORK/etc/config.yaml"
-# Same, but resolving via DigitalOcean's (authoritative) servers. Used for
-# `onboard`, which runs before the partner records exist: asking public
-# resolvers then would make them cache "no such name" for the zone's
-# negative TTL (30 minutes at DigitalOcean) and break the later checks.
-write_config "resolvers: [$(IFS=,; echo "${do_ns[*]}")]" > "$WORK/etc/onboard.yaml"
 
 compose build -q
 compose up -d --wait steward node1 node2
@@ -103,32 +91,20 @@ ACCOUNT=$(steward account 2>>"$WORK/steward.log") || { cat "$WORK/steward.log"; 
 [[ $ACCOUNT == https://acme-staging-v02.api.letsencrypt.org/* ]] || fail "unexpected account URI $ACCOUNT"
 ok "registered staging account $ACCOUNT"
 
-# --- 2. instructions ------------------------------------------------------------
-log "onboarding instructions"
-for c in main otherca; do
-  steward -config /etc/acme-steward/onboard.yaml onboard $c > "$WORK/onboard-$c.txt" 2>>"$WORK/steward.log"
-done
-echo "--- instructions for main, as a partner would receive them:"
-cat "$WORK/onboard-main.txt"
+# IMPORTANT: nothing may query a per-run name before its record exists and
+# has been published. Resolvers -- including DigitalOcean's own
+# authoritative servers -- cache "no such name" for the zone's negative TTL
+# (30 minutes), which would hide the record for that long.
 
-# Values exactly as the instructions give them.
-target_of() { awk '/Value \(target\):/ {print $3; exit}' "$WORK/onboard-$1.txt"; }
-caa_value_of() { awk '/Tag: +issue$/ {getline; sub(/^ *Value: +/, ""); print; exit}' "$WORK/onboard-$1.txt"; }
+# --- 2. play the partner ------------------------------------------------------
+log "partner adds the required records"
+# `records` prints the CNAMEs without any DNS lookups.
+declare -A TARGET=()
 for c in main otherca; do
-  t=$(target_of $c)
-  [[ $t == *.$DZ. ]] || fail "$c: CNAME target '$t' is not in $DZ"
+  line=$(steward records $c 2>>"$WORK/steward.log")
+  TARGET[$c]=$(awk '{print $3}' <<<"$line")
+  [[ ${TARGET[$c]} == *.$DZ. ]] || fail "$c: CNAME target '${TARGET[$c]}' is not in $DZ"
 done
-grep -q 'STEP 2 (OPTIONAL, RECOMMENDED)' "$WORK/onboard-main.txt" || fail "main instructions lack the optional pinning step"
-PIN_VALUE=$(caa_value_of main)
-[[ $PIN_VALUE == "letsencrypt.org; accounturi=$ACCOUNT; validationmethods=dns-01" ]] || fail "pin value: $PIN_VALUE"
-# The zone baseline permits LE: no required CAA step, only the optional pin.
-grep -q '(REQUIRED): Allow' "$WORK/onboard-main.txt" && fail "main instructions require a CAA change"
-tr -s ' \n' ' ' < "$WORK/onboard-main.txt" | grep -qE 'no CAA change is required|no change needed' ||
-  fail "main instructions should say no CAA change is needed"
-ok "instructions give targets in $DZ and a pin value for our account"
-
-# --- 3. play the partner ----------------------------------------------------------
-log "partner adds records"
 rel() { echo "${1%.$PZ}"; }
 add() { # add JSON
   local id
@@ -136,7 +112,7 @@ add() { # add JSON
   partner_records+=("$id")
 }
 for c in main otherca; do
-  add "{\"type\":\"CNAME\",\"name\":\"_acme-challenge.$(rel ${HOST[$c]})\",\"data\":\"$(target_of $c)\",\"ttl\":30}"
+  add "{\"type\":\"CNAME\",\"name\":\"_acme-challenge.$(rel ${HOST[$c]})\",\"data\":\"${TARGET[$c]}\",\"ttl\":30}"
 done
 add "{\"type\":\"A\",\"name\":\"$(rel ${HOST[main]})\",\"data\":\"$CLUSTER_ADDR\",\"ttl\":30}"
 caa() { # caa CERT VALUE  (DigitalOcean's API wants the issuer as an FQDN)
@@ -145,21 +121,39 @@ caa() { # caa CERT VALUE  (DigitalOcean's API wants the issuer as an FQDN)
 caa otherca "pki.goog."
 ok "created ${#partner_records[@]} partner records via the partner account"
 
-# Wait until DigitalOcean's servers serve them before anything public asks,
-# for the same negative-caching reason as above.
+# Give DigitalOcean time to publish before the first query (observed: under
+# 35s), then confirm every nameserver serves the records.
+sleep 60
+do_ns=()
+for ns in ns1 ns2 ns3; do do_ns+=("$ns.digitalocean.com"); done
 wait_auth() { # wait_auth NAME TYPE
-  local ns i
+  local ns
   for ns in "${do_ns[@]}"; do
-    for i in $(seq 60); do
+    for _ in $(seq 12); do
       [[ -n $(dig +short +norec "$2" "$1" @"$ns") ]] && continue 2
-      sleep 2
+      sleep 10
     done
-    fail "$2 $1 not served by $ns after 2 minutes"
+    fail "$2 $1 not served by $ns 3 minutes after creation"
   done
 }
 for c in main otherca; do wait_auth "_acme-challenge.${HOST[$c]}" CNAME; done
 wait_auth "${HOST[otherca]}" CAA
 ok "records served by all DigitalOcean nameservers"
+
+# --- 3. instructions ------------------------------------------------------------
+log "onboarding instructions"
+steward onboard main > "$WORK/onboard-main.txt" 2>>"$WORK/steward.log"
+echo "--- instructions for main, as the partner would now receive them:"
+cat "$WORK/onboard-main.txt"
+flat=$(tr -s ' \n' ' ' < "$WORK/onboard-main.txt")
+grep -q "STEP 1 (ALREADY DONE - no action needed): Add a CNAME record for ${HOST[main]}" <<<"$flat" ||
+  fail "onboard does not recognise the CNAME as done"
+grep -q '(REQUIRED)' <<<"$flat" && fail "onboard still lists required steps"
+grep -qE 'no CAA change is required|no change needed' <<<"$flat" || fail "onboard should say no CAA change is needed"
+caa_value_of() { awk '/Tag: +issue$/ {getline; sub(/^ *Value: +/, ""); print; exit}' "$WORK/onboard-$1.txt"; }
+PIN_VALUE=$(caa_value_of main)
+[[ $PIN_VALUE == "letsencrypt.org; accounturi=$ACCOUNT; validationmethods=dns-01" ]] || fail "pin value: $PIN_VALUE"
+ok "onboard sees the delegation as done and offers pinning to our account"
 
 # --- 4. verification ------------------------------------------------------------
 log "check"
@@ -203,9 +197,12 @@ for n in node1 node2; do
 done
 ok "certificates ($issuer) delivered to both nodes meeting the contract"
 
-left=$(do_list_records provider "$DZ" | jq -r ".[] | select(.type == \"TXT\" and (.name | startswith(\"$RUN\"))) | .name")
+# Only acme-steward's permanent placeholders may remain at this run's labels.
+txt=$(do_list_records provider "$DZ" | jq -c "[.[] | select(.type == \"TXT\" and (.name | startswith(\"$RUN\")))]")
+left=$(jq -r '.[] | select(.data | contains("acme-steward placeholder") | not) | "\(.name) \(.data)"' <<<"$txt")
 [[ -z $left ]] || fail "challenge TXT records left in $DZ: $left"
-ok "acme-steward removed its challenge records from $DZ"
+[[ $(jq length <<<"$txt") -eq 3 ]] || fail "expected one placeholder per label, got: $txt"
+ok "acme-steward removed its challenge records from $DZ, leaving one placeholder per label"
 
 # --- 6. renewal scheduling ----------------------------------------------------------
 log "cycle 2"

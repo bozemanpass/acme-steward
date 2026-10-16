@@ -122,6 +122,24 @@ file enforces this.
    can't be limited to a single domain, and whoever holds the token can get
    certificates issued for every delegated hostname. Create a token with
    write access to domains.
+
+   acme-steward keeps a **placeholder TXT record** at every delegate label
+   (value `acme-steward placeholder: ...`); don't delete these. They exist
+   because DigitalOcean's nameservers cache "no such name" answers for 30
+   minutes. Without a placeholder, a label has no records between orders,
+   and the lookups lego makes just before creating the challenge record
+   would cache NXDOMAIN and hide the new record until the order timed out.
+   With the placeholder the name always exists, and changes to its TXT
+   records show up within about 40 seconds. Placeholders are created
+   automatically before the first order for a label, with a 90-second wait
+   for publication, and re-checked daily.
+
+   For the same reason, after lego sees the new challenge record, acme-steward
+   waits `dns.propagation_settle` (default 90s) before letting the CA
+   validate. The CA validates from several locations, and some may reach
+   DigitalOcean nameserver instances that are still serving the previous
+   TXT set for up to about 40 seconds.
+
 2. **ACME account.** Set `acme.accept_terms: true` to accept the CA's terms;
    the account is registered on first use. Start with
    `ca: letsencrypt-staging` and switch to `letsencrypt` once everything
@@ -256,6 +274,7 @@ events:
 | `push.node_updated` | info | new files delivered to a node |
 | `push.node_failed` | error | node unreachable or rsync failed (`consecutive_failures`) |
 | `push.node_current` | debug | node already up to date |
+| `dns.placeholder_created` / `dns.placeholder_failed` | info / warn | placeholder TXT record created at a delegate label / could not be checked |
 | `account.registered` | info | ACME account created (`account_uri`) |
 | `onboard.check` | info | result of a `check` run |
 | `steward.start` / `steward.stop` / `steward.locked` | info / error | daemon lifecycle |

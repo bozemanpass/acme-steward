@@ -16,6 +16,7 @@ dns:
   delegate_zone: acme-delegate.example.net
   resolvers: [1.1.1.1, 8.8.8.8, 9.9.9.9]
   propagation_timeout: 5m
+  propagation_settle: 90s   # extra wait after the record is seen, before validation
   ttl: 30
   caa_identifiers: [letsencrypt.org]
 

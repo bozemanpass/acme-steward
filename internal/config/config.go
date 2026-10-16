@@ -96,7 +96,12 @@ type DNS struct {
 	DelegateZone       string   `yaml:"delegate_zone"`
 	Resolvers          []string `yaml:"resolvers"`
 	PropagationTimeout Duration `yaml:"propagation_timeout"`
-	TTL                int      `yaml:"ttl"`
+	// PropagationSettle is an extra wait after lego sees the challenge
+	// record before the CA is asked to validate. The CA validates from
+	// several vantage points, some of which may reach nameserver instances
+	// still serving the previous TXT set. Default 90s; "0s" disables.
+	PropagationSettle *Duration `yaml:"propagation_settle"`
+	TTL               int       `yaml:"ttl"`
 	// CAAIdentifiers are the issuer domain names accepted in CAA records.
 	CAAIdentifiers []string `yaml:"caa_identifiers"`
 }
@@ -236,6 +241,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.DNS.PropagationTimeout == 0 {
 		c.DNS.PropagationTimeout = Duration(5 * time.Minute)
+	}
+	if c.DNS.PropagationSettle == nil {
+		d := Duration(90 * time.Second)
+		c.DNS.PropagationSettle = &d
 	}
 	if c.DNS.TTL == 0 {
 		c.DNS.TTL = 30

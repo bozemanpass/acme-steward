@@ -37,6 +37,8 @@ Commands:
   status                   show certificate and node status
   onboard CERT|DOMAIN      print instructions for the partner, tailored to their
                            current DNS (plain text, suitable for email)
+  records CERT|DOMAIN      print the required CNAME record(s) in zone-file form,
+                           without any DNS lookups
   check [-wait D] [CERT|DOMAIN...]
                            verify partner DNS delegation and CAA; -wait polls
                            until ready or D elapses
@@ -89,6 +91,18 @@ func run() int {
 		return onboardCmd(cfg, &store.Store{Root: cfg.DataDir}, args[0])
 	case "check":
 		return check(cfg, &store.Store{Root: cfg.DataDir}, log, args)
+	case "records":
+		cts, err := resolveCerts(cfg, args)
+		if err != nil || len(args) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: acme-steward records CERT|DOMAIN...")
+			return 2
+		}
+		for _, ct := range cts {
+			for _, d := range baseDomains(ct) {
+				fmt.Printf("%s. CNAME %s.\n", label.ChallengeName(d), label.Target(steward.DelegateLabel(ct, d), cfg.DNS.DelegateZone))
+			}
+		}
+		return 0
 	}
 
 	st, err := store.New(cfg.DataDir)

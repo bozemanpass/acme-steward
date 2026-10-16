@@ -299,20 +299,54 @@ cases.
 
 ### Avoiding negative caching
 
-Resolvers cache "no such name" answers. DigitalOcean's zones have a
-30-minute negative TTL, so one premature lookup through a public resolver
-can break the run. Three things prevent this:
+Resolvers cache "no such name" (NXDOMAIN) answers for the zone's negative
+TTL, which is 30 minutes at DigitalOcean. **DigitalOcean's own
+authoritative nameservers do this too.** If anything queries a name before
+its new record is published, that record stays invisible, even at
+DigitalOcean, until the cached answer expires. We measured this on the test
+zones:
 
-1. **Fresh names per run.** Nothing can have looked them up before. This
-   also avoids Let's Encrypt's duplicate-certificate limit and collisions
-   between runs.
-2. **`onboard` asks DigitalOcean's servers.** `onboard` has to look up DNS
-   before the records exist, so the harness runs it with a second config
-   (`etc/onboard.yaml`) whose `dns.resolvers` are DigitalOcean's
-   nameservers, not public resolvers.
-3. **Wait for the authoritative servers.** After creating the records, the
-   harness polls `ns1`–`ns3.digitalocean.com` directly until all of them
-   serve every record. Only then does anything query public resolvers.
+| Experiment | Result |
+|---|---|
+| Create a record that nothing has queried, query after 35s | served by `ns1`–`ns3` |
+| Query a name, then create its record | still NXDOMAIN at `ns1`–`ns3` minutes later |
+| Placeholder TXT exists; add a second TXT | visible on all three in about 38s |
+| Delete it | gone in about 33s |
+| Add another on the same name | visible in about 28s |
+
+This is the same race previously seen with cert-manager creating records at
+DigitalOcean. It affects acme-steward in production, not just the test:
+lego queries the delegate label (following the partner's CNAME, and finding
+the zone) *before* it creates the challenge record. So:
+
+1. **acme-steward keeps a placeholder TXT record at every delegate label**
+   (see README, Initial setup). The name always exists, so nothing caches
+   NXDOMAIN for it, and changes to its TXT records show up within the
+   record TTL.
+2. **`check` and `onboard` never look up the delegate label.** The zone
+   lookup starts at the hostname, because a recursive SOA lookup of the
+   `_acme-challenge` name would follow the CNAME into the delegate zone.
+3. **The harness never queries a per-run name before creating it.** It
+   gets the CNAME targets from `acme-steward records`, which does no
+   lookups, creates the partner records, waits 60 seconds, then confirms
+   with `ns1`–`ns3`. Only then does it run `onboard` and `check`.
+4. **Fresh names per run** mean no earlier run can have left a cached
+   negative answer behind. This also avoids Let's Encrypt's
+   duplicate-certificate limit and collisions between runs.
+
+A related effect showed up on the first issuance attempt. lego's
+propagation check passed within seconds, from the runner's nearest
+DigitalOcean nameservers. But Let's Encrypt, validating from several
+locations, still saw only the placeholder: "Incorrect TXT record
+\"acme-steward placeholder: ...\" found". Some nameserver instances serve
+the previous TXT set for a while (up to about 40s in our measurements). So
+acme-steward waits `dns.propagation_settle` (default 90s) after the check
+passes, before asking the CA to validate.
+
+For real partners, the same caching can delay `check` seeing a new CNAME
+by up to their zone's negative TTL if anything looked the name up first
+(for example, an earlier `check` run). It sorts itself out; `check -wait`
+covers it.
 
 ### Flow
 
@@ -320,14 +354,14 @@ can break the run. Three things prevent this:
    mounted into the steward (`DO_AUTH_TOKEN_FILE`), and start the steward
    and both nodes.
 2. `acme-steward account` registers a staging account and prints its URI.
-3. `acme-steward onboard` is run for each certificate. The instructions for
-   `main` are printed in the log, exactly as a partner would receive them.
-   The harness extracts the CNAME targets **from that text**, so the test
-   proves that following the instructions literally works. It also checks
-   that the optional pinning value names our staging account.
-4. The harness, acting as the partner, creates the records through the
-   partner account's API, then waits for DigitalOcean's servers to serve
+3. The harness, acting as the partner, gets the CNAME targets from
+   `acme-steward records`, creates the records through the partner
+   account's API, waits 60 seconds, then confirms that `ns1`–`ns3` serve
    them.
+4. `acme-steward onboard main` runs and is printed in the log as the
+   partner would now receive it. It must show the CNAME step as "ALREADY
+   DONE", require nothing, say no CAA change is needed, and offer a
+   pinning value naming our staging account.
 5. `check -wait 15m main` must report READY. `check` for the other two
    must report NOT READY, with the expected reason.
 6. `cycle`:

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bozemanpass/acme-steward/internal/config"
+	"github.com/bozemanpass/acme-steward/internal/dodns"
 	"github.com/bozemanpass/acme-steward/internal/issuer"
 	"github.com/bozemanpass/acme-steward/internal/label"
 	"github.com/bozemanpass/acme-steward/internal/push"
@@ -42,8 +43,16 @@ type Steward struct {
 	NewIssuer func() (Issuer, error)
 	Pusher    *push.Pusher
 	Now       func() time.Time
+	// EnsurePlaceholder makes sure a delegate label has its placeholder TXT
+	// record, reporting whether it had to create one (see package dodns).
+	// Nil disables placeholders (no DigitalOcean token).
+	EnsurePlaceholder func(ctx context.Context, label string) (bool, error)
+	// PlaceholderWait is how long to wait after creating placeholders before
+	// ordering, so nothing queries a label before it is published.
+	PlaceholderWait time.Duration
 
-	issuer Issuer
+	issuer       Issuer
+	placeholders map[string]time.Time // label -> last confirmed present
 }
 
 func New(cfg *config.Config, st *store.Store, log *slog.Logger, doToken string) *Steward {
@@ -51,6 +60,14 @@ func New(cfg *config.Config, st *store.Store, log *slog.Logger, doToken string) 
 		Cfg: cfg, Store: st, Log: log,
 		Pusher: push.New(cfg.SSH, st.CertDir("")),
 		Now:    time.Now,
+
+		PlaceholderWait: 90 * time.Second,
+	}
+	if doToken != "" {
+		dc := dodns.New(doToken)
+		s.EnsurePlaceholder = func(ctx context.Context, label string) (bool, error) {
+			return dc.EnsurePlaceholder(ctx, cfg.DNS.DelegateZone, label, cfg.DNS.TTL)
+		}
 	}
 	s.NewIssuer = func() (Issuer, error) {
 		iss, err := issuer.New(cfg, st, doToken, log)
@@ -133,6 +150,7 @@ func (s *Steward) Cycle(ctx context.Context) {
 // RenewAll renews the named certificates (all if names is empty) when due,
 // or unconditionally if force is set. It returns the number of failures.
 func (s *Steward) RenewAll(ctx context.Context, names []string, force bool) int {
+	s.ensurePlaceholders(ctx)
 	failed := 0
 	for i := range s.Cfg.Certificates {
 		ct := &s.Cfg.Certificates[i]
@@ -147,6 +165,50 @@ func (s *Steward) RenewAll(ctx context.Context, names []string, force bool) int 
 		}
 	}
 	return failed
+}
+
+// ensurePlaceholders keeps a placeholder TXT record at every configured
+// delegate label, so the labels never return NXDOMAIN (which DigitalOcean's
+// nameservers would cache for 30 minutes, hiding new challenge records).
+// Labels confirmed within the last day are not rechecked.
+func (s *Steward) ensurePlaceholders(ctx context.Context) {
+	if s.EnsurePlaceholder == nil {
+		return
+	}
+	if s.placeholders == nil {
+		s.placeholders = map[string]time.Time{}
+	}
+	now := s.Now()
+	created := 0
+	for i := range s.Cfg.Certificates {
+		ct := &s.Cfg.Certificates[i]
+		for _, d := range ct.Domains {
+			lbl := DelegateLabel(ct, d)
+			if t, ok := s.placeholders[lbl]; ok && now.Sub(t) < 24*time.Hour {
+				continue
+			}
+			made, err := s.EnsurePlaceholder(ctx, lbl)
+			if err != nil {
+				s.Log.Warn("could not ensure placeholder record", "event", "dns.placeholder_failed",
+					"cert", ct.Name, "label", lbl, "error", err)
+				continue
+			}
+			s.placeholders[lbl] = now
+			if made {
+				created++
+				s.Log.Info("created placeholder record", "event", "dns.placeholder_created",
+					"cert", ct.Name, "name", lbl+"."+s.Cfg.DNS.DelegateZone)
+			}
+		}
+	}
+	if created > 0 && s.PlaceholderWait > 0 {
+		s.Log.Info("waiting for new placeholder records to publish", "event", "dns.placeholder_wait",
+			"wait", s.PlaceholderWait.String())
+		select {
+		case <-ctx.Done():
+		case <-time.After(s.PlaceholderWait):
+		}
+	}
 }
 
 func (s *Steward) renewOne(ct *config.Certificate, force bool) error {
