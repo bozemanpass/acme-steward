@@ -7,7 +7,9 @@ x-steward: &steward
   build: {context: ../.., dockerfile: Containerfile}
   image: acme-steward:test
   entrypoint: ["sleep", "infinity"]
-  healthcheck: {disable: true}
+  # The test runs commands in it with `exec`; it is "healthy" once running.
+  # (A disabled healthcheck makes some Compose versions fail `up --wait`.)
+  healthcheck: {test: ["CMD", "true"], interval: 1s, timeout: 5s, retries: 3}
   environment:
     ACME_STEWARD_LOG_LEVEL: debug
     # Set only by the live test; empty means "no token".
