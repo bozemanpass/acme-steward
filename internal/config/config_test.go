@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/base64"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -75,5 +77,68 @@ func TestParseDuration(t *testing.T) {
 	}
 	if _, err := ParseDuration("x"); err == nil {
 		t.Error("expected error")
+	}
+}
+
+func TestSSHKeyFromEnv(t *testing.T) {
+	raw, err := os.ReadFile("../../examples/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withKey := strings.Replace(string(raw), "  key_file: /run/secrets/acme-steward/ssh_key\n", "", 1)
+	if withKey == string(raw) {
+		t.Fatal("example config has no ssh.key_file line to remove")
+	}
+	if _, err := Parse([]byte(withKey)); err == nil || !strings.Contains(err.Error(), "ssh.key_file") {
+		t.Fatalf("missing key must be rejected, got %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(withKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvDataDir, dir)
+	pem := "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----"
+	for name, v := range map[string]string{
+		"pem":    pem,
+		"base64": base64.StdEncoding.EncodeToString([]byte(pem + "\n")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(EnvSSHKey, v)
+			c, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.SSH.KeyFile != filepath.Join(dir, "ssh_key") {
+				t.Fatal("key file", c.SSH.KeyFile)
+			}
+			if err := c.WriteSSHKey(); err != nil {
+				t.Fatal(err)
+			}
+			fi, err := os.Stat(c.SSH.KeyFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode().Perm() != 0o600 {
+				t.Errorf("mode %v", fi.Mode().Perm())
+			}
+			if b, _ := os.ReadFile(c.SSH.KeyFile); string(b) != pem+"\n" {
+				t.Errorf("content %q", b)
+			}
+		})
+	}
+
+	t.Setenv(EnvSSHKey, "not a key")
+	if _, err := Load(path); err == nil {
+		t.Error("garbage key must be rejected")
+	}
+	t.Setenv(EnvSSHKey, pem)
+	both := filepath.Join(dir, "both.yaml")
+	if err := os.WriteFile(both, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(both); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("key_file and %s together must be rejected, got %v", EnvSSHKey, err)
 	}
 }

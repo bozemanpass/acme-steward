@@ -2,9 +2,11 @@
 #
 #   docker build -f Containerfile -t acme-steward .
 #
-# Runs as an unprivileged user. Mount a persistent volume at
+# Runs as an unprivileged user: when started as root, the acme-steward
+# wrapper (container/acme-steward.sh) takes ownership of the data directory
+# and then drops privileges. Mount a persistent volume at
 # /var/lib/acme-steward and provide the config, DigitalOcean token and SSH
-# credentials as files (see README).
+# credentials (see README).
 
 FROM golang:1.26-trixie AS build
 WORKDIR /src
@@ -22,9 +24,9 @@ RUN apt-get update \
  && useradd --uid 10001 --gid acme --home-dir /var/lib/acme-steward --no-create-home --shell /usr/sbin/nologin acme \
  && install -d -o acme -g acme -m 0700 /var/lib/acme-steward \
  && install -d -m 0755 /etc/acme-steward
-COPY --from=build /out/acme-steward /usr/local/bin/acme-steward
+COPY --from=build /out/acme-steward /usr/local/libexec/acme-steward/acme-steward
+COPY container/acme-steward.sh /usr/local/bin/acme-steward
 
-USER acme
 ENV ACME_STEWARD_CONFIG=/etc/acme-steward/config.yaml \
     ACME_STEWARD_DATA_DIR=/var/lib/acme-steward
 VOLUME /var/lib/acme-steward

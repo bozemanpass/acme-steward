@@ -2,10 +2,12 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,6 +24,7 @@ const (
 	EnvLogFormat       = "ACME_STEWARD_LOG_FORMAT"
 	EnvDOAuthToken     = "DO_AUTH_TOKEN"
 	EnvDOAuthTokenFile = "DO_AUTH_TOKEN_FILE"
+	EnvSSHKey          = "ACME_STEWARD_SSH_KEY"
 
 	DefaultConfigPath = "/etc/acme-steward/config.yaml"
 	DefaultDataDir    = "/var/lib/acme-steward"
@@ -77,6 +80,7 @@ type Config struct {
 	DOAuthToken   string `yaml:"-"`
 	CADirectory   string `yaml:"-"` // resolved from ACME.CA
 	clusterByName map[string]*Cluster
+	sshKey        []byte // from ACME_STEWARD_SSH_KEY; see WriteSSHKey
 }
 
 type ACME struct {
@@ -189,12 +193,60 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := Parse(raw)
+	var sshKey []byte
+	if v := os.Getenv(EnvSSHKey); v != "" {
+		if sshKey, err = decodeSSHKey(v); err != nil {
+			return nil, err
+		}
+	}
+	cfg, err := parse(raw, sshKey)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	cfg.DataDir = envOr(EnvDataDir, DefaultDataDir)
+	if cfg.sshKey != nil {
+		cfg.SSH.KeyFile = filepath.Join(cfg.DataDir, "ssh_key")
+	}
 	return cfg, nil
+}
+
+// decodeSSHKey accepts a private key in PEM form, or base64-encoded (which
+// survives env files that cannot carry newlines).
+func decodeSSHKey(v string) ([]byte, error) {
+	v = strings.TrimSpace(v)
+	if !strings.HasPrefix(v, "-----BEGIN ") {
+		b, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(v), ""))
+		if err != nil {
+			return nil, fmt.Errorf("%s: neither a PEM private key nor base64: %w", EnvSSHKey, err)
+		}
+		v = strings.TrimSpace(string(b))
+		if !strings.HasPrefix(v, "-----BEGIN ") {
+			return nil, fmt.Errorf("%s: does not contain a PEM private key", EnvSSHKey)
+		}
+	}
+	return []byte(v + "\n"), nil
+}
+
+// WriteSSHKey writes a key given in ACME_STEWARD_SSH_KEY to ssh.key_file
+// (in the data directory, mode 0600) for ssh to read. It does nothing when
+// the key comes from a file named in the configuration.
+func (c *Config) WriteSSHKey() error {
+	if c.sshKey == nil {
+		return nil
+	}
+	f, err := os.CreateTemp(filepath.Dir(c.SSH.KeyFile), ".ssh_key.*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(c.sshKey); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), c.SSH.KeyFile)
 }
 
 // DOToken returns the DigitalOcean token from DO_AUTH_TOKEN or the file
@@ -214,8 +266,10 @@ func DOToken() (string, error) {
 }
 
 // Parse parses and validates config file content, applying defaults.
-func Parse(raw []byte) (*Config, error) {
-	cfg := &Config{}
+func Parse(raw []byte) (*Config, error) { return parse(raw, nil) }
+
+func parse(raw []byte, sshKey []byte) (*Config, error) {
+	cfg := &Config{sshKey: sshKey}
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
@@ -343,8 +397,11 @@ func (c *Config) validate() error {
 	if c.Renewal.WarnRemaining <= 0 || c.Renewal.WarnRemaining >= c.Renewal.RenewRemaining {
 		fail("renewal.warn_remaining must be between 0 and renewal.renew_remaining")
 	}
-	if len(c.Clusters) > 0 && c.SSH.KeyFile == "" {
-		fail("ssh.key_file is required")
+	if c.sshKey != nil && c.SSH.KeyFile != "" {
+		fail("ssh.key_file and %s are mutually exclusive", EnvSSHKey)
+	}
+	if len(c.Clusters) > 0 && c.SSH.KeyFile == "" && c.sshKey == nil {
+		fail("ssh.key_file (or %s) is required", EnvSSHKey)
 	}
 	if len(c.Clusters) > 0 && c.SSH.KnownHostsFile == "" {
 		fail("ssh.known_hosts_file is required (host keys are always verified)")

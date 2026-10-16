@@ -97,6 +97,7 @@ See [`examples/config.yaml`](examples/config.yaml) for every option.
 | `ACME_STEWARD_CONFIG` | config file (default `/etc/acme-steward/config.yaml`) |
 | `ACME_STEWARD_DATA_DIR` | persistent data directory (default `/var/lib/acme-steward`) |
 | `DO_AUTH_TOKEN` / `DO_AUTH_TOKEN_FILE` | DigitalOcean API token, or a file containing it (needed by `run`, `cycle`, `renew`) |
+| `ACME_STEWARD_SSH_KEY` | SSH private key, PEM or base64-encoded, instead of `ssh.key_file`; written to `ssh_key` (mode 0600) in the data directory at startup |
 | `ACME_STEWARD_LOG_LEVEL` | `debug` / `info` / `warn` / `error` |
 | `ACME_STEWARD_LOG_FORMAT` | `json` (default) or `text` |
 
@@ -291,14 +292,21 @@ image with:
 docker build -f Containerfile -t acme-steward .
 ```
 
-- The image (Debian slim with `ssh`, `rsync` and CA certificates) runs as
-  uid 10001 with `acme-steward run` as the default command.
+- The image (Debian slim with `ssh`, `rsync` and CA certificates) runs
+  `acme-steward run` as uid 10001 by default. The container starts as root
+  so that `/usr/local/bin/acme-steward` (a wrapper,
+  [`container/acme-steward.sh`](container/acme-steward.sh)) can hand the
+  data directory to uid 10001, which matters when the volume is mounted
+  root- or host-owned. It then drops privileges. Commands run with `exec`
+  go through the same wrapper. Starting the container as uid 10001
+  (`--user`, `runAsUser`) skips this step.
 - ssh refuses a private key file that is owned by the running user and
   readable by others. A secret mounted as root-owned and group-readable
   (e.g. Kubernetes `defaultMode: 0440` with `fsGroup: 10001`) works.
 - Mount a persistent volume at the data directory. Mount the DO token, SSH
   key and `known_hosts` as secrets (`DO_AUTH_TOKEN_FILE`,
-  `ssh.key_file`, `ssh.known_hosts_file`).
+  `ssh.key_file`, `ssh.known_hosts_file`), or pass the token and key as
+  `DO_AUTH_TOKEN` and `ACME_STEWARD_SSH_KEY`.
 - Run **one replica**; on Kubernetes use the `Recreate` strategy. Use
   `acme-steward healthcheck` as the liveness probe, with a start period
   long enough for initial issuance.
@@ -308,6 +316,38 @@ docker build -f Containerfile -t acme-steward .
 - The `resolvers` setting sends lego's CNAME and propagation lookups to
   public resolvers instead of in-cluster DNS, which can serve stale
   answers.
+
+### Deploying with stack
+
+The [`stack/`](stack) directory deploys acme-steward with
+[stack](https://github.com/bozemanpass/stack), to Docker Compose or
+Kubernetes. Every push publishes the image as
+`ghcr.io/bozemanpass/acme-steward:<commit>`, the tag stack expects
+(`.github/workflows/publish-image.yml`). The stack has two volumes and
+two secrets:
+
+| | |
+|---|---|
+| `acme-steward-data` | the data directory. Back it up (`stack manage ... backup`). |
+| `acme-steward-config` | `config.yaml` and `known_hosts` (set `ssh.known_hosts_file: /etc/acme-steward/known_hosts`, and leave out `ssh.key_file`) |
+| `DO_AUTH_TOKEN` | external secret |
+| `ACME_STEWARD_SSH_KEY` | external secret |
+
+```
+stack init --stack ./stack --deploy-to compose --output acme-steward-spec.yml \
+  --secret DO_AUTH_TOKEN=file:/path/to/do-token \
+  --secret 'ACME_STEWARD_SSH_KEY=exec:base64 -w0 /path/to/ssh_key'
+stack deploy --spec-file acme-steward-spec.yml --deployment-dir acme-steward-deployment
+
+cp config.yaml known_hosts acme-steward-deployment/data/acme-steward-config/
+stack manage --dir acme-steward-deployment start
+stack manage --dir acme-steward-deployment exec acme-steward "acme-steward status"
+```
+
+Pass the key through `base64`: env files can't hold the newlines of a PEM
+key. On Kubernetes the config volume becomes a ConfigMap, so copy the two
+files into the deployment's `configmaps/acme-steward-config/` instead. Set
+the log level with `--config ACME_STEWARD_LOG_LEVEL=debug` at init time.
 
 ## Security considerations
 
