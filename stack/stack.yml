@@ -1,0 +1,15 @@
+name: acme-steward
+description: "ACME certificate issuance (DNS-01 via CNAME delegation) and push to cluster nodes"
+containers:
+  - name: bozemanpass/acme-steward
+    path: .
+pods:
+  - name: acme-steward
+    path: ./stack/pods/acme-steward
+secrets:
+  # DigitalOcean API token with write access to the delegate zone.
+  DO_AUTH_TOKEN:
+    external: true
+  # Private key for the restricted rsync account on the nodes (PEM or base64).
+  ACME_STEWARD_SSH_KEY:
+    external: true

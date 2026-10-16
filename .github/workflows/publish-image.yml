@@ -1,0 +1,45 @@
+name: Publish Container Image
+
+# Tags the image with the full commit hash, which is the tag `stack` derives
+# for this repo (ghcr.io/<container name>:<recipe commit>), so `stack prepare`
+# and k8s deployments can pull it instead of building.
+on:
+  push:
+    branches:
+      - '**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Generate container image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ghcr.io/bozemanpass/acme-steward
+          tags: |
+            type=sha,enable=true,priority=100,prefix=,suffix=,format=long
+            # if is in MAIN branch, also tag as latest
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Log in to Container Image Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

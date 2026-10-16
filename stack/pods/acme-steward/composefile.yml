@@ -1,0 +1,22 @@
+services:
+  acme-steward:
+    image: bozemanpass/acme-steward:stack
+    restart: always
+    # ACME_STEWARD_LOG_LEVEL / _FORMAT can be set with --config at init time.
+    environment:
+      ACME_STEWARD_CONFIG: /etc/acme-steward/config.yaml
+      ACME_STEWARD_DATA_DIR: /var/lib/acme-steward
+    healthcheck:
+      test: ["CMD", "acme-steward", "healthcheck"]
+      interval: 5m
+      timeout: 10s
+      start_period: 30m
+    volumes:
+      # ACME account key, issued certificates and keys, state. Back this up.
+      - acme-steward-data:/var/lib/acme-steward
+      # config.yaml and known_hosts, supplied by the deployer.
+      - acme-steward-config:/etc/acme-steward:ro
+
+volumes:
+  acme-steward-data:
+  acme-steward-config:

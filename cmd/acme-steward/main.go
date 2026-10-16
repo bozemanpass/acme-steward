@@ -53,6 +53,7 @@ Environment:
   ACME_STEWARD_LOG_LEVEL   debug|info|warn|error (default info)
   ACME_STEWARD_LOG_FORMAT  json|text (default json)
   DO_AUTH_TOKEN[_FILE]     DigitalOcean API token, or a file containing it
+  ACME_STEWARD_SSH_KEY     SSH private key (PEM or base64), instead of ssh.key_file
 `
 
 func main() {
@@ -108,6 +109,10 @@ func run() int {
 	st, err := store.New(cfg.DataDir)
 	if err != nil {
 		log.Error("opening data directory", "event", "store.error", "error", err)
+		return 1
+	}
+	if err := cfg.WriteSSHKey(); err != nil {
+		log.Error("writing ssh key", "event", "config.error", "error", err)
 		return 1
 	}
 
