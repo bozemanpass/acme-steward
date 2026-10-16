@@ -265,8 +265,9 @@ E2E_DO_PROVIDER_TOKEN=... E2E_DO_PROVIDER_ZONE=acme-delegate-test.fyi \
   tests/live/run.sh                      # KEEP=1 leaves containers up
 ```
 
-> **Status:** passing (13/13) when run locally on 2026-10-16. Not yet run
-> in GitHub Actions.
+> **Status:** passing (13/13) locally and in GitHub Actions since
+> 2026-10-16. One later Actions run failed only because Let's Encrypt
+> staging returned 503s (see [When the CA is the problem](#when-the-ca-is-the-problem)).
 
 This test reuses the distribution topology from §3 (via
 `tests/compose/lib.sh`), with nothing faked on the issuance side:
@@ -447,8 +448,38 @@ Each line is one `PASS` in the output:
 | 12 | Second cycle: ARI schedule, no reissue | `renew_at_source: ari` from staging |
 | 13 | Forced renewal reaches the nodes; previous version kept | `renew -force` + `push`; `keep_versions` retention |
 
+### When the CA is the problem
+
+The test depends on Let's Encrypt staging being up. When a step that
+talks to the CA fails (account registration, the first cycle, forced
+renewal), the harness scans that step's log for HTTP errors the CA
+returned. If it finds any, it prints a `***` banner above the `FAIL`
+line and, in GitHub Actions, adds an error annotation to the run summary.
+
+- **5xx, "Let's Encrypt staging returned server errors".** Staging was
+  overloaded or down. Seen on 2026-10-16: `503 ...
+  urn:ietf:params:acme:error:rateLimited :: Service busy; retry later` on
+  authorization polls. Despite the `rateLimited` type, a 503 is Let's
+  Encrypt shedding load, not a limit on our account or domains. Nothing in
+  acme-steward is implicated. Check https://letsencrypt.status.io/ and
+  re-run the failed job (the banner prints the exact `gh run rerun`
+  command). If the error persists for hours, wait for the next weekly
+  run.
+- **429, "Let's Encrypt staging rate-limited this run".** A real
+  [rate limit](https://letsencrypt.org/docs/rate-limits/) was hit, and
+  the message names which one. Re-running won't help until that limit's
+  window passes. Each run uses fresh names and a fresh account, so a 429
+  usually means runs are being repeated too often (for example, many
+  manual dispatches in a short time).
+
+A failure with no banner, or one where a banner appears but other checks
+also failed, should be investigated as usual.
+
 ### Lessons learned
 
+- **Let's Encrypt staging has outages.** One run failed on 503 "Service
+  busy" responses alone. The harness now says so explicitly (see above),
+  so such a run isn't mistaken for a regression.
 - **DigitalOcean caches NXDOMAIN at its own nameservers** (see above). This
   was a real production bug, found only by this test.
 - **Let's Encrypt validates from several locations.** lego's propagation
