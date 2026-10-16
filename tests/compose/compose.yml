@@ -1,0 +1,56 @@
+# Distribution test: the real acme-steward image pushing over ssh to two
+# test nodes with the production-style restricted rsync account.
+# Driven by run.sh, which generates keys and config into $WORK.
+name: acme-steward-test
+
+x-steward: &steward
+  build: {context: ../.., dockerfile: Containerfile}
+  image: acme-steward:test
+  entrypoint: ["sleep", "infinity"]
+  healthcheck: {disable: true}
+  environment:
+    ACME_STEWARD_LOG_LEVEL: debug
+    # Set only by the live test; empty means "no token".
+    DO_AUTH_TOKEN_FILE: ${STEWARD_DO_TOKEN_FILE:-}
+  volumes:
+    - ${WORK:?}/etc:/etc/acme-steward:ro
+    - ${WORK:?}/steward:/run/secrets/acme-steward:ro
+    - ${WORK:?}/import:/import:ro
+
+x-node: &node
+  build: {context: node, dockerfile: Containerfile}
+  image: acme-steward-test-node:test
+
+services:
+  steward:
+    <<: *steward
+    volumes:
+      - ${WORK:?}/etc:/etc/acme-steward:ro
+      - ${WORK:?}/steward:/run/secrets/acme-steward:ro
+      - ${WORK:?}/import:/import:ro
+      - data:/var/lib/acme-steward
+    networks: {test: {ipv4_address: "${SUBNET_PREFIX:-172.30.99}.10"}}
+
+  # Same image, key and config, but not at the address authorised by the
+  # nodes' from= restriction.
+  intruder:
+    <<: *steward
+    networks: {test: {ipv4_address: "${SUBNET_PREFIX:-172.30.99}.20"}}
+
+  node1:
+    <<: *node
+    volumes: ["${WORK:?}/node1:/keys:ro"]
+    networks: {test: {ipv4_address: "${SUBNET_PREFIX:-172.30.99}.11"}}
+
+  node2:
+    <<: *node
+    volumes: ["${WORK:?}/node2:/keys:ro"]
+    networks: {test: {ipv4_address: "${SUBNET_PREFIX:-172.30.99}.12"}}
+
+networks:
+  test:
+    ipam:
+      config: [{subnet: "${SUBNET_PREFIX:-172.30.99}.0/24"}]
+
+volumes:
+  data: {}

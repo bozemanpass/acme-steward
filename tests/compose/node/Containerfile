@@ -1,0 +1,14 @@
+# Test stand-in for a cluster node: sshd plus a restricted rsync-only
+# account, configured as the README's node-side contract describes.
+FROM debian:trixie-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-server rsync python3 \
+ && rm -rf /var/lib/apt/lists/* /etc/ssh/ssh_host_* \
+ && useradd --create-home --shell /bin/sh certdeploy \
+ && install -d -o certdeploy -g certdeploy -m 0755 /srv/certs \
+ && install -d -m 0755 /run/sshd
+COPY sshd.conf /etc/ssh/sshd_config.d/test.conf
+COPY --chmod=0755 entrypoint.sh /usr/local/sbin/entrypoint.sh
+COPY --chmod=0755 check-contract.py /usr/local/bin/check-contract
+HEALTHCHECK --interval=1s --timeout=2s --retries=30 CMD ["test", "-e", "/run/sshd.pid"]
+ENTRYPOINT ["/usr/local/sbin/entrypoint.sh"]

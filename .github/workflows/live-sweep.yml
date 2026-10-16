@@ -1,0 +1,27 @@
+name: Live test DNS sweep
+
+# Removes DNS records left by live test runs that crashed before cleaning up.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 3 * * *"
+
+concurrency:
+  group: live-dns
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    environment: e2e
+    if: vars.E2E_DO_PARTNER_ZONE != ''
+    steps:
+      - uses: actions/checkout@v6
+      - name: Sweep test records
+        env:
+          E2E_DO_PARTNER_TOKEN: ${{ secrets.E2E_DO_PARTNER_TOKEN }}
+          E2E_DO_PARTNER_ZONE: ${{ vars.E2E_DO_PARTNER_ZONE }}
+          E2E_DO_PROVIDER_TOKEN: ${{ secrets.E2E_DO_PROVIDER_TOKEN }}
+          E2E_DO_PROVIDER_ZONE: ${{ vars.E2E_DO_PROVIDER_ZONE }}
+        run: tests/live/sweep.sh

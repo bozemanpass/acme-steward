@@ -1,0 +1,66 @@
+# acme-steward example configuration.
+# Secrets are not stored here: the DigitalOcean token comes from
+# DO_AUTH_TOKEN or DO_AUTH_TOKEN_FILE.
+
+acme:
+  email: certs@example.net          # optional account contact
+  ca: letsencrypt-staging           # letsencrypt | letsencrypt-staging | https://.../directory
+  accept_terms: true                # required to register a new ACME account
+  key_type: ec256                   # ec256 | ec384 | rsa2048 | rsa3072 | rsa4096
+  # profile: tlsserver              # optional ACME profile
+
+dns:
+  # Zone hosted at DigitalOcean that partners' _acme-challenge CNAMEs point
+  # into. Use a dedicated domain, in a DigitalOcean account that holds only
+  # this zone.
+  delegate_zone: acme-delegate.example.net
+  resolvers: [1.1.1.1, 8.8.8.8, 9.9.9.9]
+  propagation_timeout: 5m
+  ttl: 30
+  caa_identifiers: [letsencrypt.org]
+
+renewal:
+  check_interval: 1h        # how often to check renewal and reconcile nodes
+  renew_remaining: 0.33     # renew with 1/3 of lifetime left if the CA has no ARI
+  warn_remaining: 0.16      # log expiry warnings below this fraction
+  max_issues_per_week: 3    # per-certificate guard against issuance loops
+  retry_min: 1h             # backoff after a failed order...
+  retry_max: 24h            # ...doubling up to this
+  keep_versions: 3
+
+ssh:
+  user: certdeploy
+  port: 22
+  key_file: /run/secrets/acme-steward/ssh_key
+  known_hosts_file: /run/secrets/acme-steward/known_hosts
+  connect_timeout: 15s
+  parallel: 4
+
+clusters:
+  - name: east
+    remote_dir: certs                 # relative to the rrsync root on each node
+    addresses: [203.0.113.10]         # floating IP(s); used by `check` only
+    nodes:
+      - host: east-1.internal.example.net
+      - host: east-2.internal.example.net
+      - host: 198.51.100.7
+        port: 2222
+
+certificates:
+  - name: partner-a
+    domains: [sync.partner-a.example.com]
+    clusters: [east]
+  - name: partner-b
+    domains: ["*.svc.partner-b.example.org", svc.partner-b.example.org]
+    clusters: [east]
+    key_type: rsa2048
+    # Pin a label (e.g. one agreed before the derivation scheme existed):
+    # delegate_labels:
+    #   svc.partner-b.example.org: partner-b
+
+# Used by `acme-steward onboard` when writing instructions for partners.
+partner_instructions:
+  organization: Example Corp
+  contact: certs@example.net
+  caa_pin: optional         # optional | required | off: CAA accounturi pinning
+  # ca_name: Let's Encrypt   # defaults from dns.caa_identifiers

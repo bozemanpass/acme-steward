@@ -1,0 +1,35 @@
+name: Live test
+
+# Let's Encrypt staging + real DigitalOcean DNS + distribution to container
+# nodes. See docs/testing.md, section 4.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 07:00 UTC
+    - cron: "0 7 * * 1"
+
+# Shared with the DNS sweep so it never deletes records of a run in progress.
+concurrency:
+  group: live-dns
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: Live (LE staging + DigitalOcean)
+    runs-on: ubuntu-latest
+    environment: e2e
+    timeout-minutes: 45
+    # Skip until the e2e environment is configured.
+    if: vars.E2E_DO_PARTNER_ZONE != ''
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run live test
+        env:
+          E2E_DO_PARTNER_TOKEN: ${{ secrets.E2E_DO_PARTNER_TOKEN }}
+          E2E_DO_PARTNER_ZONE: ${{ vars.E2E_DO_PARTNER_ZONE }}
+          E2E_DO_PROVIDER_TOKEN: ${{ secrets.E2E_DO_PROVIDER_TOKEN }}
+          E2E_DO_PROVIDER_ZONE: ${{ vars.E2E_DO_PROVIDER_ZONE }}
+        run: tests/live/run.sh
