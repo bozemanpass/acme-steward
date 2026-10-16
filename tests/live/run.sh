@@ -53,6 +53,40 @@ cleanup_hooks+=(cleanup_dns)
 
 log() { echo; echo "=== $*"; }
 
+# fail_ca MESSAGE LOG...: fail, first explaining any errors the CA itself
+# returned in LOG. Those say nothing about acme-steward, and the follow-up
+# differs; see docs/testing.md, "When the CA is the problem".
+fail_ca() {
+  local msg=$1; shift
+  local busy limited
+  busy=$(grep -ohE 'acme: error: 5[0-9]{2} :: [^"\\]*' "$@" 2>/dev/null | sort -u | head -3 || true)
+  limited=$(grep -ohE 'acme: error: 429 :: [^"\\]*' "$@" 2>/dev/null | sort -u | head -3 || true)
+  if [[ -n $busy ]]; then
+    cat >&2 <<EOF
+
+*** Let's Encrypt staging returned server errors (5xx) during this step:
+$busy
+*** The CA was overloaded or down; this is most likely not an acme-steward
+*** failure. Re-run once staging recovers (https://letsencrypt.status.io/)${GITHUB_RUN_ID:+:
+***   gh run rerun $GITHUB_RUN_ID --failed}
+EOF
+    [[ -n ${GITHUB_ACTIONS:-} ]] &&
+      echo "::error title=Let's Encrypt staging unavailable::CA returned 5xx; re-run once staging recovers (see docs/testing.md)"
+  fi
+  if [[ -n $limited ]]; then
+    cat >&2 <<EOF
+
+*** Let's Encrypt staging rate-limited this run (429):
+$limited
+*** A re-run won't help until the limit's window passes. The message names
+*** the limit; see docs/testing.md, "When the CA is the problem".
+EOF
+    [[ -n ${GITHUB_ACTIONS:-} ]] &&
+      echo "::error title=Let's Encrypt staging rate limit::CA returned 429; see docs/testing.md before re-running"
+  fi
+  fail "$msg"
+}
+
 # --- setup ------------------------------------------------------------------
 setup_ssh
 umask 022
@@ -87,7 +121,7 @@ compose up -d --wait steward node1 node2
 
 # --- 1. account ---------------------------------------------------------------
 log "ACME account"
-ACCOUNT=$(steward account 2>>"$WORK/steward.log") || { cat "$WORK/steward.log"; fail "account registration"; }
+ACCOUNT=$(steward account 2>>"$WORK/steward.log") || { cat "$WORK/steward.log"; fail_ca "account registration" "$WORK/steward.log"; }
 [[ $ACCOUNT == https://acme-staging-v02.api.letsencrypt.org/* ]] || fail "unexpected account URI $ACCOUNT"
 ok "registered staging account $ACCOUNT"
 
@@ -175,11 +209,11 @@ steward cycle 2> "$WORK/cycle1.log" || true
 events() { # events LOG EVENT CERT
   grep '^{' "$1" | jq -c "select(.event == \"$2\" and .cert == \"$3\")" || true
 }
-[[ -n $(events "$WORK/cycle1.log" cert.issued main) ]] || { cat "$WORK/cycle1.log"; fail "main not issued"; }
+[[ -n $(events "$WORK/cycle1.log" cert.issued main) ]] || { cat "$WORK/cycle1.log"; fail_ca "main not issued" "$WORK/cycle1.log"; }
 ok "main (base + wildcard) issued by staging"
 
 e=$(events "$WORK/cycle1.log" cert.issue_failed otherca)
-grep -qi caa <<<"$e" || { cat "$WORK/cycle1.log"; fail "otherca: expected a CAA refusal, got: $e"; }
+grep -qi caa <<<"$e" || { cat "$WORK/cycle1.log"; fail_ca "otherca: expected a CAA refusal, got: $e" "$WORK/cycle1.log"; }
 ok "the CA refuses issuance where CAA forbids it"
 
 e=$(events "$WORK/cycle1.log" cert.issue_failed nocname)
@@ -214,7 +248,7 @@ ok "second cycle schedules renewal from staging's ARI and does not reissue"
 
 # --- 7. forced renewal -------------------------------------------------------------------
 log "forced renewal"
-steward renew -force main 2> "$WORK/renew.log" || { cat "$WORK/renew.log"; fail "forced renewal"; }
+steward renew -force main 2> "$WORK/renew.log" || { cat "$WORK/renew.log"; fail_ca "forced renewal" "$WORK/renew.log"; }
 steward push 2>/dev/null || fail "push after renewal"
 v2=$(manifest main | jq -r .version)
 [[ $v2 != "$v1" ]] || fail "no new version"
