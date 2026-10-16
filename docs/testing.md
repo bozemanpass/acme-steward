@@ -16,6 +16,44 @@ The first three are in `.github/workflows/test.yml`; the live tier is in
 more fake with the real thing. The live tier is the only one that talks to
 outside services.
 
+### Coverage summary
+
+What is exercised for real in at least one tier (U = unit, P = Pebble,
+D = distribution, L = live):
+
+| Area | Covered | Notes |
+|---|---|---|
+| Config parsing and validation | U | |
+| Delegate label derivation | U, P, L | |
+| ACME account registration | P, L | |
+| Issuance via CNAME delegation (base + wildcard) | P, L | L uses real Let's Encrypt staging and DigitalOcean |
+| Delegation guard (missing CNAME) | P, L | |
+| CA refusal due to CAA | L | |
+| CAA evaluation in `check` (tree climbing, `issuewild`, `accounturi`, `validationmethods`) | U | `accounturi` can't be set live (DigitalOcean API) |
+| Partner instructions (`onboard`) | U, L | L checks detection of a real delegation |
+| Readiness check (`check`) | U, L | |
+| Placeholder records and propagation settle | U, P, L | L is the only tier where the underlying DNS caching exists |
+| ARI renewal scheduling | U, P, L | |
+| Lifetime fallback, backoff, weekly issuance guard | U | |
+| Forced renewal with `replaces` | P, L | |
+| Expiry warnings, healthcheck | U | |
+| Push via ssh/rsync to restricted rrsync accounts | D, L | |
+| Node-side contract (layout, hashes, modes, ownership) | D, L | |
+| Host-key verification, `from=` restriction, no shell | D | |
+| Node down / catch-up, pruning on nodes | D | |
+| Node in several clusters (rrsync single session) | U, D | |
+| `import` | U, D | |
+| Container image (`Containerfile`) | D, L | |
+
+Not covered by any automated test:
+
+- Let's Encrypt **production** (only staging is used).
+- CAA `accounturi` pinning enforced by a real CA (DigitalOcean can't host it).
+- Long-running daemon behaviour over days: `run`, real renewal at the
+  ARI-chosen time, daily placeholder rechecks.
+- Real node operating systems, firewalls and node-side provisioning
+  (out of scope; that belongs to the node-side project).
+
 ---
 
 ## 1. Unit tests
@@ -48,6 +86,11 @@ Plain Go tests. Some points that aren't obvious from the code:
   CAA blocks, pinned to another account, left-over TXT, wrong target,
   propagating, complete, pin required, and wildcard `issuewild`. They also
   check that output is ASCII and that prose wraps at 72 columns.
+- **Placeholders.** `internal/dodns` tests the DigitalOcean client against
+  an `httptest` server: the placeholder is created only when missing, a
+  quoted value counts as present, and API errors surface. The steward test
+  checks that new placeholders trigger the publication wait, and that
+  confirmed labels are rechecked only daily.
 
 ---
 
@@ -87,9 +130,10 @@ How it works:
   returned together). It listens on UDP and TCP because Pebble queries
   over TCP. Pebble's own `pebble-challtestsrv` can't be used, because it
   doesn't answer SOA/NS queries and lego needs them to find the zone.
-- **Fake DigitalOcean API.** It implements the two endpoints lego's
-  provider calls (create and delete a domain record) and writes into the
-  DNS server. lego is pointed at it with `DO_API_URL`.
+- **Fake DigitalOcean API.** It implements the endpoints lego's provider
+  and acme-steward's placeholder client call (list, create and delete
+  domain records) and writes into the DNS server. Both are pointed at it
+  with `DO_API_URL`.
 - **Trusting Pebble.** `LEGO_CA_CERTIFICATES` points lego at Pebble's
   test root (`test/certs/pebble.minica.pem` in the Pebble module).
 - **Test hook.** `issuer.ExtraDNSOptions` disables lego's check against
@@ -100,8 +144,10 @@ What it checks:
 
 - a certificate for `svc.partner.test` plus `*.svc.partner.test` is issued
   through the delegation;
-- every TXT write lands on the delegate label (two writes, one per
-  authorization), and all of them are removed afterwards;
+- every TXT write lands in the delegate zone: one placeholder per label,
+  then one challenge record per authorization (the base name and wildcard
+  share a label);
+- afterwards only the placeholders remain;
 - a hostname with no CNAME is refused by the delegation guard;
 - a second cycle uses ARI scheduling and doesn't reissue;
 - `renew -force` produces a new version.
@@ -219,8 +265,8 @@ E2E_DO_PROVIDER_TOKEN=... E2E_DO_PROVIDER_ZONE=acme-delegate-test.fyi \
   tests/live/run.sh                      # KEEP=1 leaves containers up
 ```
 
-> **Status:** implemented (`tests/live/`, `.github/workflows/live.yml`),
-> but not yet run against the real accounts.
+> **Status:** passing (13/13) when run locally on 2026-10-16. Not yet run
+> in GitHub Actions.
 
 This test reuses the distribution topology from §3 (via
 `tests/compose/lib.sh`), with nothing faked on the issuance side:
@@ -231,8 +277,9 @@ This test reuses the distribution topology from §3 (via
 - the challenge record is reached through a **real partner CNAME**.
 
 It needs `docker`, `jq`, `curl`, `dig` and `ssh-keygen`; GitHub's
-`ubuntu-latest` has them all. A run takes a few minutes, mostly waiting
-for DNS propagation and validation.
+`ubuntu-latest` has them all. A run takes about 6 minutes, mostly
+deliberate waits: 60s for the partner records to publish, 90s for new
+placeholders, and a 90s settle per order.
 
 ### Accounts and zones (set up once, manually)
 
@@ -273,7 +320,7 @@ ID>-<attempt>` (or `r<unix time>` locally), and uses three hostnames:
 
 | Certificate | Hostname | Partner records the harness adds | Expected |
 |---|---|---|---|
-| `main` | `RUN.<zone>` and `*.RUN.<zone>` | CNAME (from `onboard`); `A 192.0.2.10` | issued (baseline zone CAA applies) |
+| `main` | `RUN.<zone>` and `*.RUN.<zone>` | CNAME (target from `acme-steward records`); `A 192.0.2.10` | issued (baseline zone CAA applies) |
 | `otherca` | `RUN-ca.<zone>` | CNAME; `CAA 0 issue "pki.goog"` | `check` NOT READY; the CA refuses (CAA) |
 | `nocname` | `RUN-none.<zone>` | none | `check` NOT READY; refused by the delegation guard without contacting the CA |
 
@@ -288,9 +335,11 @@ would need a partner test zone at a provider that accepts the parameters.
 The same API also requires the issuer as an FQDN with a trailing dot
 (`pki.goog.`), although the value is served without it.
 
-acme-steward itself, using only the provider token, creates and deletes the
-challenge `TXT` records at each `<label>.<provider zone>`. The harness uses
-the provider token only to check, afterwards, that none were left behind.
+acme-steward itself, using only the provider token, creates a permanent
+placeholder `TXT` record at each `<label>.<provider zone>`, and creates and
+deletes the challenge `TXT` records next to it. The harness uses the
+provider token only to check, afterwards, that only the placeholders
+remain, and to delete this run's placeholders at cleanup.
 
 CAA is looked up at the certificate's hostname first, then towards the zone
 apex, and the first CAA set found applies. That is why CAA records on
@@ -299,20 +348,54 @@ cases.
 
 ### Avoiding negative caching
 
-Resolvers cache "no such name" answers. DigitalOcean's zones have a
-30-minute negative TTL, so one premature lookup through a public resolver
-can break the run. Three things prevent this:
+Resolvers cache "no such name" (NXDOMAIN) answers for the zone's negative
+TTL, which is 30 minutes at DigitalOcean. **DigitalOcean's own
+authoritative nameservers do this too.** If anything queries a name before
+its new record is published, that record stays invisible, even at
+DigitalOcean, until the cached answer expires. We measured this on the test
+zones:
 
-1. **Fresh names per run.** Nothing can have looked them up before. This
-   also avoids Let's Encrypt's duplicate-certificate limit and collisions
-   between runs.
-2. **`onboard` asks DigitalOcean's servers.** `onboard` has to look up DNS
-   before the records exist, so the harness runs it with a second config
-   (`etc/onboard.yaml`) whose `dns.resolvers` are DigitalOcean's
-   nameservers, not public resolvers.
-3. **Wait for the authoritative servers.** After creating the records, the
-   harness polls `ns1`–`ns3.digitalocean.com` directly until all of them
-   serve every record. Only then does anything query public resolvers.
+| Experiment | Result |
+|---|---|
+| Create a record that nothing has queried, query after 35s | served by `ns1`–`ns3` |
+| Query a name, then create its record | still NXDOMAIN at `ns1`–`ns3` minutes later |
+| Placeholder TXT exists; add a second TXT | visible on all three in about 38s |
+| Delete it | gone in about 33s |
+| Add another on the same name | visible in about 28s |
+
+This is the same race previously seen with cert-manager creating records at
+DigitalOcean. It affects acme-steward in production, not just the test:
+lego queries the delegate label (following the partner's CNAME, and finding
+the zone) *before* it creates the challenge record. So:
+
+1. **acme-steward keeps a placeholder TXT record at every delegate label**
+   (see README, Initial setup). The name always exists, so nothing caches
+   NXDOMAIN for it, and changes to its TXT records show up within the
+   record TTL.
+2. **`check` and `onboard` never look up the delegate label.** The zone
+   lookup starts at the hostname, because a recursive SOA lookup of the
+   `_acme-challenge` name would follow the CNAME into the delegate zone.
+3. **The harness never queries a per-run name before creating it.** It
+   gets the CNAME targets from `acme-steward records`, which does no
+   lookups, creates the partner records, waits 60 seconds, then confirms
+   with `ns1`–`ns3`. Only then does it run `onboard` and `check`.
+4. **Fresh names per run** mean no earlier run can have left a cached
+   negative answer behind. This also avoids Let's Encrypt's
+   duplicate-certificate limit and collisions between runs.
+
+A related effect showed up on the first issuance attempt. lego's
+propagation check passed within seconds, from the runner's nearest
+DigitalOcean nameservers. But Let's Encrypt, validating from several
+locations, still saw only the placeholder: "Incorrect TXT record
+\"acme-steward placeholder: ...\" found". Some nameserver instances serve
+the previous TXT set for a while (up to about 40s in our measurements). So
+acme-steward waits `dns.propagation_settle` (default 90s) after the check
+passes, before asking the CA to validate.
+
+For real partners, the same caching can delay `check` seeing a new CNAME
+by up to their zone's negative TTL if anything looked the name up first
+(for example, an earlier `check` run). It sorts itself out; `check -wait`
+covers it.
 
 ### Flow
 
@@ -320,14 +403,14 @@ can break the run. Three things prevent this:
    mounted into the steward (`DO_AUTH_TOKEN_FILE`), and start the steward
    and both nodes.
 2. `acme-steward account` registers a staging account and prints its URI.
-3. `acme-steward onboard` is run for each certificate. The instructions for
-   `main` are printed in the log, exactly as a partner would receive them.
-   The harness extracts the CNAME targets **from that text**, so the test
-   proves that following the instructions literally works. It also checks
-   that the optional pinning value names our staging account.
-4. The harness, acting as the partner, creates the records through the
-   partner account's API, then waits for DigitalOcean's servers to serve
+3. The harness, acting as the partner, gets the CNAME targets from
+   `acme-steward records`, creates the records through the partner
+   account's API, waits 60 seconds, then confirms that `ns1`–`ns3` serve
    them.
+4. `acme-steward onboard main` runs and is printed in the log as the
+   partner would now receive it. It must show the CNAME step as "ALREADY
+   DONE", require nothing, say no CAA change is needed, and offer a
+   pinning value naming our staging account.
 5. `check -wait 15m main` must report READY. `check` for the other two
    must report NOT READY, with the expected reason.
 6. `cycle`:
@@ -335,12 +418,51 @@ can break the run. Three things prevent this:
      nodes, passing `check-contract`;
    - `otherca` fails with a CAA error from the CA;
    - `nocname` fails at the delegation guard;
-   - no challenge TXT records remain in the provider zone.
+   - only the placeholders remain in the provider zone (one per label).
 7. Second `cycle`: no reissue, and the renewal schedule comes from ARI.
 8. `renew -force main` then `push`: the new version reaches both nodes, and
    the previous one is retained.
 9. Cleanup always runs (a `trap`): delete this run's partner records and
-   any leftover provider TXT records, then tear down the containers.
+   its provider TXT records (placeholders included; they belong to this
+   run's labels only), then tear down the containers. On failure, the tail
+   of every log in the work directory is printed first.
+
+### Test cases
+
+Each line is one `PASS` in the output:
+
+| # | Case | Proves |
+|---|---|---|
+| 1 | Staging account registered | account creation against a real CA; URI is from staging |
+| 2 | Partner records created via the partner account | harness plays the partner with its own credentials |
+| 3 | Records served by `ns1`–`ns3` | publication confirmed without premature queries |
+| 4 | `onboard` sees the delegation as done and offers pinning | instructions reflect real DNS; pin value names our account |
+| 5 | `check` READY for the correct setup | real public resolvers and the partner's real nameservers agree |
+| 6 | `check` NOT READY with the right reason | CAA blocking (`otherca`) and missing CNAME (`nocname`) are explained |
+| 7 | `main` issued by staging | base + wildcard via the real CNAME into the real delegate zone |
+| 8 | CA refuses where CAA forbids | Let's Encrypt's own CAA enforcement (`urn:ietf:params:acme:error:caa`) |
+| 9 | Delegation guard refuses `nocname` | refusal before any validation attempt |
+| 10 | Delivered to both nodes, meeting the contract | staging issuer in the manifest; `check-contract` passes on each node |
+| 11 | Only placeholders remain in the delegate zone | challenge records cleaned up; one placeholder per label |
+| 12 | Second cycle: ARI schedule, no reissue | `renew_at_source: ari` from staging |
+| 13 | Forced renewal reaches the nodes; previous version kept | `renew -force` + `push`; `keep_versions` retention |
+
+### Lessons learned
+
+- **DigitalOcean caches NXDOMAIN at its own nameservers** (see above). This
+  was a real production bug, found only by this test.
+- **Let's Encrypt validates from several locations.** lego's propagation
+  check passing isn't enough on its own; hence `propagation_settle`.
+- **DigitalOcean's DNS API** rejects CAA values with parameters, and wants
+  CAA issuer values as FQDNs with a trailing dot.
+- **Never let a umask leak.** The harness's token helper once set
+  `umask 077` for the whole script. Files created afterwards (the steward's
+  `known_hosts`) became unreadable to the container user, and ssh reported
+  "Host key verification failed". Credential files are now written in a
+  subshell, and `known_hosts` gets an explicit mode.
+- **Keep logs when a test fails.** The work directory is deleted at
+  cleanup, so the cleanup now prints log tails first. Without that, the
+  umask failure above was a bare "not a symlink".
 
 ### Cleanup and hygiene
 

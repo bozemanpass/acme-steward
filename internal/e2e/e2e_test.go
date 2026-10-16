@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +32,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/bozemanpass/acme-steward/internal/config"
+	"github.com/bozemanpass/acme-steward/internal/dodns"
 	"github.com/bozemanpass/acme-steward/internal/issuer"
 	"github.com/bozemanpass/acme-steward/internal/label"
 	"github.com/bozemanpass/acme-steward/internal/steward"
@@ -103,6 +105,7 @@ func (z *zoneDNS) start(t *testing.T) string {
 func fakeDO(t *testing.T, z *zoneDNS, writes *[]string) *httptest.Server {
 	var mu sync.Mutex
 	ids := map[int]string{}
+	data := map[int]string{}
 	next := 1
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -113,6 +116,15 @@ func fakeDO(t *testing.T, z *zoneDNS, writes *[]string) *httptest.Server {
 			return
 		}
 		switch r.Method {
+		case http.MethodGet: // list, filtered by type and FQDN as the real API does
+			name := r.URL.Query().Get("name")
+			var recs []map[string]any
+			for id, n := range ids {
+				if n == dns.Fqdn(name) {
+					recs = append(recs, map[string]any{"id": id, "type": "TXT", "name": strings.TrimSuffix(name, "."+delegateZone), "data": data[id]})
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"domain_records": recs})
 		case http.MethodPost:
 			var rec struct{ Type, Name, Data string }
 			json.NewDecoder(r.Body).Decode(&rec)
@@ -125,14 +137,19 @@ func fakeDO(t *testing.T, z *zoneDNS, writes *[]string) *httptest.Server {
 			z.mu.Unlock()
 			*writes = append(*writes, name)
 			ids[next] = name
+			data[next] = rec.Data
 			fmt.Fprintf(w, `{"domain_record":{"id":%d,"type":"TXT","name":%q,"data":%q}}`, next, rec.Name, rec.Data)
 			next++
 		case http.MethodDelete:
 			var id int
 			fmt.Sscan(parts[4], &id)
 			z.mu.Lock()
-			delete(z.txt, ids[id])
+			z.txt[ids[id]] = slices.DeleteFunc(z.txt[ids[id]], func(v string) bool { return v == data[id] })
+			if len(z.txt[ids[id]]) == 0 {
+				delete(z.txt, ids[id])
+			}
 			z.mu.Unlock()
+			delete(ids, id)
 			w.WriteHeader(http.StatusNoContent)
 		}
 	}))
@@ -213,7 +230,7 @@ func TestEndToEnd(t *testing.T) {
 	remote := t.TempDir()
 	cfg, err := config.Parse([]byte(fmt.Sprintf(`
 acme: {ca: %q, accept_terms: true}
-dns: {delegate_zone: %s, resolvers: [%q], propagation_timeout: 30s}
+dns: {delegate_zone: %s, resolvers: [%q], propagation_timeout: 30s, propagation_settle: 0s}
 ssh: {user: u, key_file: /k, known_hosts_file: /kh}
 clusters:
   - {name: c, remote_dir: %q, nodes: [{host: n1}]}
@@ -237,6 +254,7 @@ certificates:
 	log := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	issuer.RouteLegoLogs(log.Handler())
 	s := steward.New(cfg, st, log, "do-token")
+	s.PlaceholderWait = 0 // the test DNS server doesn't cache
 	s.Pusher.SSHCommand = testutil.FakeSSH(t, filepath.Join(t.TempDir(), "nofail"))
 
 	s.Cycle(context.Background())
@@ -252,15 +270,19 @@ certificates:
 		t.Error("domains", m.Domains)
 	}
 	for _, w := range writes {
-		if w != dns.Fqdn(target) {
-			t.Errorf("TXT written outside the delegate label: %s", w)
+		if !strings.HasSuffix(w, "."+delegateZone+".") {
+			t.Errorf("TXT written outside the delegate zone: %s", w)
 		}
 	}
-	if len(writes) != 2 { // one per authorization: base name and wildcard share the label
-		t.Errorf("expected 2 TXT writes, got %v", writes)
+	// One placeholder per label (good and undelegated), then one challenge
+	// per authorization: the base name and wildcard share a label.
+	if len(writes) != 4 {
+		t.Errorf("expected 4 TXT writes, got %v", writes)
 	}
-	if len(z.txt) != 0 {
-		t.Errorf("challenge records not cleaned up: %v", z.txt)
+	for n, vals := range z.txt {
+		if len(vals) != 1 || vals[0] != dodns.PlaceholderValue {
+			t.Errorf("challenge records not cleaned up at %s: %v", n, vals)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(remote, "good", "current", store.FileFullchain)); err != nil {
 		t.Error("not pushed:", err)

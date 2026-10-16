@@ -185,7 +185,10 @@ func (c *Checker) Challenge(domain, wantCNAME string) ChallengeInfo {
 		}
 		ci.Public[r] = got
 	}
-	zone, err := c.findZone(ci.Name)
+	// Find the zone from the hostname, not the _acme-challenge name: a
+	// recursive SOA lookup of that name would follow the CNAME and query the
+	// delegate label, which may cache NXDOMAIN there (see package dodns).
+	zone, err := c.findZone(base)
 	if err != nil {
 		ci.AuthErr["(zone)"] = err
 		return ci

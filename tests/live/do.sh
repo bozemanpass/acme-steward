@@ -10,8 +10,8 @@ do_hdr_dir=${WORK:?}/harness
 mkdir -p "$do_hdr_dir" && chmod 0700 "$do_hdr_dir"
 
 do_auth() { # do_auth NAME TOKEN
-  umask 077
-  printf 'Authorization: Bearer %s\n' "$2" > "$do_hdr_dir/$1.hdr"
+  # Subshell: the umask must not leak into the caller.
+  (umask 077; printf 'Authorization: Bearer %s\n' "$2" > "$do_hdr_dir/$1.hdr")
 }
 
 do_api() { # do_api NAME METHOD PATH [JSON] -> response body

@@ -24,6 +24,11 @@ cleanup() {
   local rc=$?
   for h in "${cleanup_hooks[@]}"; do "$h" || true; done
   if [[ $rc -ne 0 ]]; then
+    local f
+    for f in "$WORK"/*.log; do
+      [[ -e $f ]] || continue
+      echo "--- $(basename "$f") (last 60 lines)"; tail -60 "$f"
+    done
     echo "--- node1 sshd log"; compose logs --no-color node1 2>/dev/null | tail -20 || true
   fi
   if [[ -z "${KEEP:-}" ]]; then
@@ -51,6 +56,8 @@ setup_ssh() {
     echo "from=\"$SUBNET_PREFIX.10\",restrict,command=\"rrsync -wo /srv/certs\" $(cat "$WORK/steward/ssh_key.pub")" \
       > "$WORK/$n/authorized_keys"
   done
+  # Readable by the container user, whatever the caller's umask.
+  chmod 0644 "$WORK/steward/known_hosts"
 }
 
 # ssh_config_yaml: the ssh section shared by test configs.

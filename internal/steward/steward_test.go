@@ -291,3 +291,37 @@ exit $rc
 		t.Errorf("state for both clusters not recorded: %+v", ps)
 	}
 }
+
+func TestPlaceholders(t *testing.T) {
+	e := newEnv(t)
+	present := map[string]bool{}
+	calls := 0
+	e.s.EnsurePlaceholder = func(_ context.Context, lbl string) (bool, error) {
+		calls++
+		if present[lbl] {
+			return false, nil
+		}
+		present[lbl] = true
+		return true, nil
+	}
+	e.s.PlaceholderWait = time.Millisecond
+	e.s.RenewAll(context.Background(), nil, false)
+	if len(present) != 2 || calls != 2 {
+		t.Fatalf("placeholders %v, calls %d", present, calls)
+	}
+	if !strings.Contains(e.logs.String(), "event=dns.placeholder_wait") {
+		t.Error("no wait after creating placeholders")
+	}
+	// Confirmed labels aren't rechecked within a day.
+	e.advance(time.Hour)
+	e.s.RenewAll(context.Background(), nil, false)
+	if calls != 2 {
+		t.Errorf("rechecked too soon: %d calls", calls)
+	}
+	e.advance(25 * time.Hour)
+	e.logs.Reset()
+	e.s.RenewAll(context.Background(), nil, false)
+	if calls != 4 || strings.Contains(e.logs.String(), "placeholder_wait") {
+		t.Errorf("daily recheck: %d calls; logs:\n%s", calls, e.logs.String())
+	}
+}
