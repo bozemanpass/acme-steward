@@ -5,7 +5,7 @@
 acme:
   email: certs@example.net          # optional account contact
   # Required: letsencrypt | letsencrypt-staging (untrusted test certificates) | https://.../directory
-  # Changing it later doesn't replace certificates already issued until their next renewal.
+  # Choose it before the first deployment: changing it later isn't supported (see README).
   ca: letsencrypt-staging
   accept_terms: true                # required to register a new ACME account
   key_type: ec256                   # ec256 | ec384 | rsa2048 | rsa3072 | rsa4096

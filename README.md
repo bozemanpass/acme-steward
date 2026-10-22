@@ -145,9 +145,9 @@ file enforces this.
    the account is registered on first use. `acme.ca` is required: set
    `letsencrypt` for real certificates (`letsencrypt-staging` issues
    untrusted test certificates, which are delivered and served all the
-   same). Choose the CA before the first deployment, as changing it later
-   doesn't replace certificates already issued; they move to the new CA
-   only at their next renewal. **Back up `account/account.key`**: a
+   same). Choose the CA before the first deployment: changing it later
+   isn't supported, as renewals then ask the new CA to replace (ARI
+   `replaces`) a certificate it didn't issue, which it rejects. **Back up `account/account.key`**: a
    partner who pins issuance to our account with CAA `accounturi` can only
    be renewed with that key.
 3. **SSH.** Generate a key pair for acme-steward. Collect the nodes' host
