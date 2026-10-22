@@ -283,7 +283,6 @@ func parse(raw []byte, sshKey []byte) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
-	setDefault(&c.ACME.CA, "letsencrypt-staging")
 	setDefault(&c.ACME.KeyType, "ec256")
 	if len(c.DNS.Resolvers) == 0 {
 		c.DNS.Resolvers = []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}
@@ -373,7 +372,11 @@ func (c *Config) validate() error {
 	var errs []error
 	fail := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 
-	if u, ok := caDirectories[c.ACME.CA]; ok {
+	// No default: staging certificates would be delivered and served, and changing
+	// the CA later doesn't replace them until they renew
+	if c.ACME.CA == "" {
+		fail("acme.ca is required: letsencrypt, letsencrypt-staging or an https:// directory URL")
+	} else if u, ok := caDirectories[c.ACME.CA]; ok {
 		c.CADirectory = u
 	} else if strings.HasPrefix(c.ACME.CA, "https://") {
 		c.CADirectory = c.ACME.CA

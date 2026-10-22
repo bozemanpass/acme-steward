@@ -66,6 +66,10 @@ certificates:
 	if _, err := Parse([]byte("acme: {bogus: 1}")); err == nil {
 		t.Error("unknown fields must be rejected")
 	}
+	// No default CA: staging certificates would otherwise be delivered by accident
+	if _, err := Parse([]byte("dns: {delegate_zone: d.example.net}")); err == nil || !strings.Contains(err.Error(), "acme.ca is required") {
+		t.Errorf("a missing acme.ca must be rejected, got: %v", err)
+	}
 }
 
 func TestParseDuration(t *testing.T) {

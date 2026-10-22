@@ -142,10 +142,14 @@ file enforces this.
    TXT set for up to about 40 seconds.
 
 2. **ACME account.** Set `acme.accept_terms: true` to accept the CA's terms;
-   the account is registered on first use. Start with
-   `ca: letsencrypt-staging` and switch to `letsencrypt` once everything
-   works. **Back up `account/account.key`**: a partner who pins issuance to
-   our account with CAA `accounturi` can only be renewed with that key.
+   the account is registered on first use. `acme.ca` is required: set
+   `letsencrypt` for real certificates (`letsencrypt-staging` issues
+   untrusted test certificates, which are delivered and served all the
+   same). Choose the CA before the first deployment, as changing it later
+   doesn't replace certificates already issued; they move to the new CA
+   only at their next renewal. **Back up `account/account.key`**: a
+   partner who pins issuance to our account with CAA `accounturi` can only
+   be renewed with that key.
 3. **SSH.** Generate a key pair for acme-steward. Collect the nodes' host
    keys into a `known_hosts` file (`ssh-keyscan`, verified out of band).
    Host keys are always checked strictly. Set up each node as described
