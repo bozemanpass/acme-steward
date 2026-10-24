@@ -8,7 +8,7 @@
 # /var/lib/acme-steward and provide the config, DigitalOcean token and SSH
 # credentials (see README).
 
-FROM golang:1.26-trixie AS build
+FROM golang:1.26.10-trixie AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
