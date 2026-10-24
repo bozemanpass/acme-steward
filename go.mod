@@ -2,6 +2,8 @@ module github.com/bozemanpass/acme-steward
 
 go 1.25.0
 
+toolchain go1.26.10
+
 require (
 	github.com/go-acme/lego/v4 v4.35.2
 	gopkg.in/yaml.v3 v3.0.1

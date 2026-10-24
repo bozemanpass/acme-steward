@@ -402,6 +402,23 @@ All three run in GitHub Actions (`.github/workflows/test.yml`). See [docs/testin
 each tier works, the live test against Let's Encrypt staging and
 real DigitalOcean zones, and notes on CAA.
 
+### Go version
+
+The Go version is pinned in two places, which must be kept in step:
+
+- the `toolchain` line in `go.mod`, used by the CI test jobs (via
+  `setup-go`) and by local builds;
+- the `golang:` build image tag in `Containerfile`, used for the
+  published image.
+
+Because they are pinned, **Go security fixes are not picked up
+automatically.** Go's standard library (including `crypto/tls` and
+`crypto/x509`) is compiled into the binary, so a Go security release,
+such as the fix for CVE-2026-111943 (compromised CA intermediates), only
+takes effect once both pins are bumped and a new image is built. Watch
+the [Go security announcements](https://groups.google.com/g/golang-announce)
+and bump both pins when a relevant fix ships.
+
 ## Possible future work
 
 - **DNS-PERSIST-01**, a proposed challenge type that uses a single
